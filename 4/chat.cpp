@@ -100,6 +100,9 @@ using namespace std;
 const size_t BUF_SIZE = 4096;
 #define LISTEN_QUEUE 5
 
+struct pollfd fds[256];
+int fds_sz = 1;
+
 struct user {
     int socket = -1;
     string room;
@@ -119,9 +122,6 @@ map<int, user> users;
 void add_user(int socket) {
 	users.insert(make_pair(socket, user(socket)));
 }
-/*user get_user(int socket) {
-	return users.find(socket)->second;
-}*/
 void disconnect(int socket) {
     close(socket);
 	//user us = get_user(socket);
@@ -135,26 +135,22 @@ void move_buf(buf_t* buf, int pos) {
 	memmove(str, str+pos, buf_size(buf));
 }
 void push_to_room(string room, char* str, int count) {
-	cerr<<"push to room, msg = "<<str<<"\n";
 	for (auto& i : users) {
 		if (i.second.room == room) {
 			int oldsize = buf_size(i.second.output);
 			i.second.output->size += count;
 			char* dat = buf_get_data(i.second.output);
-			for (int j = 1; j <= count; j++)
-				dat[oldsize+j] = str[j-1];
+			for (int j = 0; j <= count; j++)
+				dat[oldsize+j] = str[j];
 		}
 	}
 
 }
 void process(int socket) {
-	cerr<<"process: "<<socket<<"\n";
 	buf_t* buf = users.find(socket)->second.input;
 	char* str = buf_get_data(buf);
-	cerr<<"in buf sz= "<<buf_size(buf)<<" ";
-	cerr<<"buf:"<<string(str)<<"\n";
 	if (!users.find(socket)->second.active) {
-		for (int i = 0; i <= buf_size(buf); i++) {
+		for (int i = 0; i < buf_size(buf); i++) {
 			if (str[i] == '\n') {
 				for (int j = 0; j < i; j++)
 					users.find(socket)->second.room += str[j];
@@ -164,11 +160,21 @@ void process(int socket) {
 			}
 		}
 	}
-	cerr<<"room: "<<users.find(socket)->second.room<<"\n";
-	for (int i = buf_size(buf); i >= 0; i--) {
+	for (int i = buf_size(buf)-1; i >= 0; i--) {
 		if (str[i] == '\n') {
-			push_to_room(users.find(socket)->second.room, str, i);
+			push_to_room(users.find(socket)->second.room, str, i+1);
 			move_buf(buf, i+1);
+		}
+	}
+}
+
+void set_events() {
+	for (auto& i : users) {
+		if (i.second.output->size > 0) {
+			for (int j = 1; j < fds_sz; j++) {
+				if (fds[j].fd == i.second.socket) 
+					fds[j].events |= POLLOUT;
+			}
 		}
 	}
 }
@@ -186,9 +192,6 @@ int make_server(struct addrinfo *localhost) {
 	}
 	return sock1;
 }
-
-struct pollfd fds[256];
-int fds_sz = 1;
 
 void print_state() {
 	cerr<<"fds: ";
@@ -228,7 +231,7 @@ int main(int argc, char** argv) {
 
 	while (1) {
 		int res = poll(fds, fds_sz, -1);
-		print_state();
+		//print_state();
 		if (res == -1) {
 			if(errno == EINTR)
 				continue;
@@ -243,7 +246,7 @@ int main(int argc, char** argv) {
 					return 11;
 				}
 				add_user(cli);
-				fds[fds_sz].events = POLLOUT | POLLIN | POLLRDHUP;
+				fds[fds_sz].events = POLLIN | POLLRDHUP;
 				fds[fds_sz].fd = cli;
 				fds_sz ++;
 				fds[0].events = POLLIN;
@@ -255,20 +258,23 @@ int main(int argc, char** argv) {
 			int sock = fds[i].fd;
 			if (ce) {
 				if (ce & POLLOUT) {
-					cerr<<"can write to"<<sock<<"\n";
 					buf_t* buf = users.find(sock)->second.output;
-					int oldsize = buf_size(buf);
 					if (buf_flush(sock, buf, 1) < 0) {
 						disconnect(sock);
 						fds_sz --;	
 						cerr<<"disconnected(write returns -1): "<<sock<<"\n";
 						continue;
 					}
-					fds[i].events |= POLLOUT;
+					if (buf_size(buf) > 0) {
+						fds[i].events |= POLLOUT;
+					} else {
+						fds[i].events &= ~POLLOUT;
+					}
 				}
 				if (ce & POLLIN) {
 					buf_t* buf = users.find(sock)->second.input;
 					int oldsize = buf_size(buf);
+					char* qqq = buf_get_data(buf);
 					if (buf_fill(sock, buf, oldsize + 1) < 0) {
 						disconnect(sock);
 						fds_sz --;	
@@ -276,6 +282,7 @@ int main(int argc, char** argv) {
 						continue;
 					}
 					process(sock);
+					set_events();
 					fds[i].events |= POLLIN;
 				}
 				if ((ce & POLLRDHUP) || (ce & POLLHUP) || (ce & POLLERR)) {
